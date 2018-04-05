@@ -1,0 +1,675 @@
+\documentclass[titlepage]{article}
+\usepackage{graphicx}
+\usepackage[utf8]{inputenc}
+\usepackage[hidelinks]{hyperref}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{fancyhdr}
+\usepackage{color}
+\pagestyle{fancy}
+\usepackage{xcolor}
+\usepackage{mdframed}
+\usepackage{titlepic}
+\usepackage[backend=bibtex,style=nature]{biblatex}
+\rhead{page \thepage}
+%opening
+\title{CIDA - a Calcium Imaging Deconvolution API\\Master Thesis}
+\author{Maximilian Ernst Otto Pfeiffer}
+\bibliography{/home/maximilian/Documents/Texstuff/MAthesisLibrary}
+\titlepic{\includegraphics[width=0.8\linewidth]{./ma_images/uni_logos}}
+
+\begin{document}
+\maketitle
+
+\newpage
+\tableofcontents
+\newpage
+\section{Abstract}
+
+Numerous assays geared towards capturing neural activity exist. They range from patch-clamp methods, targeting singular cell membrane potentials, to larger scale techniques capturing the activity of neural populations and even whole brain regions, such as local field potential (LFP) recordings and electroencephalography (EEG), respectively.\\
+Unfortunately, life science in general and neural research specifically is subject to a strong invasiveness-resolution trade-off: increasingly invasive methods (such as electrophysiological recordings, which require introducing electrodes into the brain) yield increasingly high-resolution data, while less invasive techniques suffer from a loss of resolution\cite{dayan_theoretical_2001}.\\
+Furthermore, highly invasive methods are more likely to disrupt the system being studied, potentially producing atypical behavior. This is particularly problematic for studies aiming to uncover how neurons process information at the neural circuit level; neuronal populations build very deliberate and precise architectures and exhibit a high level of organization and regulation, necessitating high resolution assays\cite{pachitariu_extracting_2013}. \\\\
+One promising method is Calcium neuro-imaging(CNI), a widely used technique with many applications in neuroscience. CNI is less invasive than standard electrophysiological recordings, and is able to capture the activity of a relatively high number of neurons simultaneously\cite{denk_two-photon_1990}.
+This method combines genetically encoded calcium indicators with laser-illuminated two-photon microscopy, and allows for measurement of neural activity of up to thousands of neurons simultaneously\cite{dayan_theoretical_2001}\cite{dombeck_imaging_2007}\cite{yaksi_reconstruction_2006}.\\
+Determining an underlying action potential train from the observed calcium concentration trace is a non-trivial task because the relationship between the two is complex. There are several publications that tackle this problem and report good results, however they tend to not supply their code or restrict availability to matlab\cite{pachitariu_extracting_2013}\cite{smith_parallel_2010}\cite{mukamel_automated_2009}\cite{maruyama_detecting_2014}\cite{tomek_two-photon_2013}.
+Furthermore, most available implementations employ computationally expensive models, limiting their applicability.\\
+Unlike these approaches, this thesis presents an API using temporal deconvolution to extract spike trains, a method which has been reported to produce good results before\cite{yaksi_reconstruction_2006}. It critically depends on the ability to model the calcium signal response to an action potential, for which I present a novel extraction algorithm, improving the accuracy of deconvolution. This annotation method is based on signal change ratios observed in the data, and can generally be used to label regions of activity in  time series.\\
+The code is made available via a public license(GNU GPL), allowing for easy modification and adaptation. Additionally, it contains quantile- and baseline-normalization methods for time series.
+Also included is a script which can be run from a terminal, requires no installation and can deconvolve input data as-is, without requiring any specific parameters to be adapted.
+\section{Methods}
+\subsection{Calcium-Neuroimaging}
+\subsubsection{Background}
+Neurons are capable of several activities which are relevant for information processing,
+the most important being the production of action potentials (AP)\cite{dayan_theoretical_2001}.
+An AP is an ‘all-or-none’ electrical\footnote{Signals are transmitted via a current of ions (and the electric field that is propagated by said current) rather than an electromagnetic wave, and are thus much slower\cite{schmidt_physiologie_2007}. Note that this is only true in the absence of a surrounding myelin sheath, which allows for electric signal transduction\cite{schmidt_physiologie_2007}. Because of this, APs spread throughout neural somata in an electrotonic manner, as opposed to rapidly propagating along their myelinated axons\cite{schmidt_physiologie_2007}.} impulse resulting from changes in a neuron’s membrane potential.
+The depolarization of a presynaptic cell causes a release of neurotransmitters into the synapse, which typically bind the post-synaptic neuron's ligand-gated ion channels.\\
+This, in turn, causes a change in the membrane potential of the postsynaptic neuron, which, if the charge surpasses a certain threshold\footnote{typically -55mV\cite{loffler_biochemie_1998}, 15mV higher than the resting potential}, "triggers" the neuron and it fires an action potential (see Figure \ref{fig:action_potential_med}).\\
+Presynaptic signals are not always excitatory, however, and can instead decrease (hyperpolarize) the postsynaptic cell's membrane potential, consequently inhibiting its firing activity\cite{purves_ion_2001}. This behavior is determined by the type of neurotransmitter released into the synapse, and excitatory postsynaptic potentials (EPSPs) are thus differentiated from inhibitory postsynaptic potentials (IPSPs).
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\linewidth]{./ma_images/action_potential_med}
+\caption{A: schematic of the extracellular membrane potential of a neuron during an action potential, starting from stimulus-triggered depolarization of the cell, subsequent repolarization and a negative overshoot prior to returning to the resting potential at -70mV.\newline
+B: Ion currents underlying A. Initially, voltage-gated $Na^{+}$-channels open, consequently depolarizing the membrane rapidly due to the concentration gradient causing an influx of ions into the cell. This also causes voltage-gated $Ca^{2+}$-channels to open, which cause the cell to reach +60mV. $K^{+}$-channels open at this voltage, allowing for them to flow out, while the $Ca^{2+}$-channels close, resulting in the cell's repolarization. Taken from \citeauthor{bahar_er_2016}\cite{bahar_er_2016}.}
+ \label{fig:action_potential_med}
+\end{figure}\\
+More specifically, EPSPs typically release the amino-acid glutamate, which binds a number of receptors. They range from neuromodulatory, and consequently long-term effecting, GPCRs of the mGluR-family to ligand-gated $Ca^{2+}$ and $Na^{+}$-channels. They are summarized as ionotropic glutamate receptors\cite{schmidt_physiologie_2007} and include NMDA, AMPA and kainate receptors\cite{schmidt_physiologie_2007}. \\ 
+These ion channels open, one trans-membrane molecule per ligand, and allow cations to flow into the cell, causing a local depolarization\cite{nover_lehrbuch_2005}.
+This localized electric potential then, if the threshold voltage is surpassed, causes voltage-gated ion channels to open. The resulting flow of ions further propagates the electric field, leading to a cascade-like spread of open channels and electric potential spike over the neuron's membrane. A correlation between intracellular calcium concentration and firing activity is to be expected\cite{dayan_theoretical_2001} because calcium is one of the mentioned types of ions involved in firing activity. Calcium also acts as an intracellular second messenger in signal transduction cascades and is involved in the exocytosis of neurotransmitters at the axon terminal\cite{schmidt_physiologie_2007}, meaning it likely plays a more complex role than just a simple charge carrying body.\\
+Notwithstanding, neuronal-intracellular $Ca^{2+}$-concentrations are expected to be strongly related to firing activity, which is further elaborated in the subsequent section.\\
+
+\subsubsection{Relationship Between Calcium Concentrations and Spikes}\label{calcium}
+In order to derive the underlying firing activity of a neuron from its observed calcium dye-induced fluorescence, it is necessary to regard their relation. 
+As argued in the previous section, we strongly expect a to see a dependence between the two, the question is what other factors come into play.
+A number of variables have been reported to influence the captured fluorescence signal, such as cell size, position relative to the focal point of the microscope and metabolic state of the cell\cite{dombeck_two-photon_2014}.\\
+An additional consideration to be made is that while the average duration of an action potential is 2 ms, followed by a 2 ms refractory period, $Ca^{2+}$-dynamics are significantly slower and less responsive.\\
+This is why experimenters record at frequencies ranging from 8 to 32 Hz\cite{denk_two-photon_1990}\cite{dombeck_imaging_2007}\cite{dombeck_two-photon_2014}, they do not observe significant changes in signal intensity at faster rates.\\
+While the difference in temporal resolution is big enough to raise aliasing concerns, the retrieval of spike trains from calcium-fluorescence signals is a well established possibility that has been used extensively in neural research\cite{miyazaki_simultaneous_2015}. Figure \ref{fig:ca2_apRelation} depicts an example of the fluorescence response to increasing AP density. CNI measurements can accordingly be expected to produce increasingly strong signals during maintained firing activity, the ion stream continues until an equilibrium between the diffusion pressure and membrane voltage is reached (Nernst Potential)\cite{nover_lehrbuch_2005}. Outside of spiking behavior, the cell returns to its state and corresponding signal intensity, the recording of which is referred to as \emph{baseline}(see section \ref{base}).
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\linewidth]{./ma_images/ca2_apRelation}
+\caption{Calcium signal and spiking activity in a mitral cell. From top to bottom: current injected into the cell for induction of activity, spike train measured via micro-electrode, and calcium signal using two different dyes, OGB-1(green) and Rhod-2(red), respectively. Data is normalized w.r.t. baseline activity. Taken from Yaksi et al\cite{yaksi_reconstruction_2006}}
+\label{fig:ca2_apRelation}
+\end{figure}
+Accordingly, reconstruction of spike trains from calcium Neuroimaging (CNI)-data is non-trivial and requires a number of steps; spiking activity and calcium signal scale in a non-linear manner.\\
+Multiple publications report the dynamics of calcium indicators\cite{yaksi_reconstruction_2006}\cite{dana_sensitive_2016}\cite{akerboom_optimization_2012}\cite{chen_ultrasensitive_2013} w.r.t. different underlying spike trains. Other variables to keep in mind are the species the sample is taken from, the specific cell type recorded and the dye in use(see Figure \ref{fig:ca2_apRelation}). None of these are necessarily predictive of spiking rates, however.
+\subsubsection{Method Setup}
+CNI is a widely used and well established technique for visualizing and studying information processing in vivo\cite{grienberger_imaging_2012}, with \citeauthor{orbach_optical_1985}(1985) going as far as calling it an "Optical mapping of electrical activity[..]".\\
+Applications are many, with the organisms it is used with ranging from small organisms like c. elegans and drosophila to mice, rats and macaques\cite{li_long-term_2017}\cite{tian_imaging_2009}. All of these methods share the requirement for genetically encoded calcium indicators, which in turn allow laser-illuminated highlighting of intracellular calcium concentrations\cite{denk_two-photon_1990}.\\
+These are subsequently recorded, the typical method used being two-photon microscopy, which has sufficient of resolution to outline individual neurons.
+The resulting videos capture up to hundreds of cells at once, penetrating as deep as 0.5 mm below the brain's surface \cite{denk_two-photon_1990}.\\
+CNI allows for not only single-cell imaging, but also for capturing $Ca^{2+}$-dynamics in individual cell compartments, such as dendrites or axons\cite{miyazaki_simultaneous_2015}.\\
+To give an example of a protocol employed in CNI, lets take a look at a somewhat recent publication(2007) by \citeauthor{dombeck_imaging_2007}, which records in vivo without the tight restrictions of subjects normally required by such essays.
+This is achieved via the installation of a cranial plate, which keeps the subject in place.
+The result is a mitigation of the side effects normally caused by penetration of brain tissue necessary for CNI, but requires a hole to be bored into the skull regardless. Without it, the recordings would no longer maintain a stable focal point, rendering subsequent analyses of the data difficult.\\ 
+Dombeck and colleagues then situate the mouse on a movable styrofoam ball which the mouse can rotate underneath it, thus giving it a semblance of free movement.\cite{dombeck_two-photon_2014}.
+\\
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\linewidth]{./ma_images/cal_neuroim_setup}
+\caption{Setup of a CNI experiment. The laser is used to illuminate the calcium dye, so that concentrations may be captured in the focal plane. Image taken from \citeauthor{dombeck_imaging_2007}\cite{dombeck_imaging_2007}.}
+\label{fig:cal_neuroim_setup}
+\end{figure}
+An additional advantage is that having to sedate a subject for experimentation potentially influences its neural behavior, thus increasing the desirability of experiments without a need thereof.\\
+CNI allows to determine the location and dynamics of calcium channels and receptors, as well as indirectly displaying action potentials, and can often be executed without sedation of the subject\cite{grienberger_imaging_2012}.\\
+There is a range of differing experimental procedures producing a corresponding range of data, which nonetheless all share the following complication:\\
+While light signals were measured, what we are actually interested in is spiking activity. Unfortunately, the given signal does not directly translate into action potentials like e.g. membrane potential data would, so a dedicated method is required for the retrieval of spike trains\cite{pnevmatikakis_simultaneous_2016}.
+\subsection{Preparation of Raw Data}\label{annotation}
+The initial form of raw CNI data is a series of frames, showing fluorescence traces in the recorded region, a single frame of which is depicted in Figure \ref{fig:neuroimaging}.\\
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\linewidth]{./ma_images/neuroimaging}
+\caption{Example of a CNI frame, recorded in vitro in a cortical culture, loaded with green OGB-1 dye. Taken from \citeurl{noauthor_meaney_nodate}\cite{noauthor_meaney_nodate}.}
+\label{fig:neuroimaging}
+\end{figure}
+Further analysis thus requires the neurons to be identified and labeled as separate entities: regarding mean luminescence of the full images is unlikely to yield meaningful results.\\
+A number of methods automating this step have been published, which are based on a number of observations.\\
+First, cells have physical bodies and are thus spatially localized. Accordingly, regarding pixel-wise signal activity should exhibit strong correlation for pixels belonging to cell somata. \\
+This fact can be exploited for numerous algorithmic implementations, such as dictionary learning \cite{pachitariu_extracting_2013}, local correlation matrices (which typically calculate pixel-pair correlations to derive cell bounds) \cite{smith_parallel_2010} as well as a stand-alone python tool using normalized cuts \cite{kaifosh_sima:_2014}.\\
+Alternatively, some authors use the observation that fluorescence signals in CNI are inherently sparse, and consequently parse the data into a number of statistically independent signals.\\
+Furthermore, a widely used algorithm by Mukamel et al \cite{mukamel_automated_2009} performs independent component analysis on fluorescence scores to estimate cell location, while Pnevmatikakis et al\cite{pnevmatikakis_simultaneous_2016} and Mayamura et al\cite{maruyama_detecting_2014} published implementations using non-negative matrix defactorization to dissociate somata from background.\\\\
+The data used for the testing of the method presented in this thesis was manually labeled using the ImageJ GUI \cite{noauthor_imagej_nodate} by Marie Rooy and Fani Koukouli, who generated the respective sets.\\
+\citeauthor{dana_sensitive_2016}, \citeauthor{chen_ultrasensitive_2013} and \citeauthor{akerboom_optimization_2012} published a total of 5 sets of data which were used for verification of the method; they used similar procedures for the annotation of their recordings.\\
+The manual approach is hardly viable when confronted with larger sets of data, where using one of the aforementioned algorithms is preferable.\\
+Due to multiple fully annotated data sets being freely available for testing the algorithm's performance, I did not perform additional annotation of raw data.\\
+Additionally, because of the multitude of available algorithms already published for this purpose, I elected not to include corresponding methods in the API, but tested the annotation procedures listed above for compatibility and ease of use.\\
+Some of these implementations were either not shared publicly unless personally requested\cite{pachitariu_extracting_2013}\cite{smith_parallel_2010}\cite{maruyama_detecting_2014}, were made available  only in Matlab\cite{mukamel_automated_2009}\cite{tomek_two-photon_2013} or froze the processor of two separate computers entirely, requiring further debugging prior to usage\cite{pnevmatikakis_simultaneous_2016}.\\
+The previously mentioned algorithm by Kaifosh et al \cite{kaifosh_sima:_2014} (titled "\emph{SIMA"}) however is well documented and can easily be incorporated into individual python scripts, in addition to which a GUI is included, facilitating visualization and subsequent verification of the output.\\
+This is why I would recommend usage of Kaifosh's algorithm for annotation, used alongside CIDA for subsequent steps of analysis.\\
+Their API(SIMA) can be installed using the automated and public package manager CONDA\cite{noauthor_conda_nodate}, which automatically installs its dependencies as well the tool itself, thus facilitating its ease of use.\\
+\subsection{Normalization} \label{norm}
+Due to the previously mentioned variables in quantifying calcium concentrations, some form of normalization is necessary in order to compare cells.\\
+This is especially true for CNI, which this API was developed for.
+Calcium signals are unfortunately not purely indicative of firing activity, but also play a crucial role in the metabolic state of cells\cite{nover_lehrbuch_2005}.
+Since the goal is to decode their firing activity, there is no information to be gained from cell size, cell-type dependent differences in calcium dynamics and similar properties. All of these influence the observed $Ca^{2+}$-dynamics, however\cite{smetters_detecting_1999}.\\
+Additionally, some manner of correction has to be applied in case of systematic bias, i.e. 'drift' in the signal. A typical source of such a change is a movement-induced shift of the microscope's focal layer, which can be remedied with \emph{quantile correction}.
+\subsubsection{Quantile Correction} \label{quant}
+In the case of in-vivo data, CNI fundamentally uses a microscope to record a living organism. Movement of the sample being experimented on is thus a frequent occurrence.
+As a result, some cells move towards the focus, causing a stronger detection of fluorescence, while others do the opposite.\\
+This can be accounted for by quantile-correcting the data, that is taking a low(5-10\%) quantile value over a moving window, and subtracting the respective result at each position.\cite{dombeck_imaging_2007}\\
+Given a sorted series of values $a = (a_1,a_2,..,a_n)\quad \epsilon\quad R^n$, the $i$-th percentile with $i \epsilon [0,1]$ is simply $a_{ \lfloor i*n \rfloor}$.\footnote{Remark: $a_n$ denotes the $n$-th element of series $a$, and $a_{ \lfloor i*n \rfloor}$ consequently the value located at the position corresponding to the product of $i*n$ rounded down.}
+Performing quantile correction $q(x)\rightarrow y$ with $x,y \quad \epsilon  \quad R$, x and y being two lists of the same size, an empirical series $s = (s_1,s_2,..,.s_l)$ of length $l>n$ (l being the total number of frames in the recording) with a widow size of $n$ called $window$ and the $i$th percentile is thus defined as:\\
+\begin{align*}
+\texttt{for $j$ in $l-n$ do:} &\\
+& window:= (s_j,s_{j+1},..,s_{j+n})\\
+& \texttt{sort} \quad window\\
+& s_j = s_j - window_{i*n} \\
+(s_{(l-n)},s_{(l-n+1)},..,& s_n) = (s_{(l-n)}- window_{i*n},s_{(l-n+1)}- window_{i*n},..,s_n- window_{i*n}) \\
+\texttt{return}\quad \qquad s\qquad &
+\end{align*}
+Notice that the rolling window of size $n$ needed for the calculation of the percentile does not fit into the last $n$ points of the data to be normalized.\\
+I detract the last percentile value available for the correction of this data, which is correct in case of constant drift, thus including no drift at all.\\
+Because we are only considering low percentiles (roughly in the 5\% region), calculating the percentile value of the shrinking window located at the end of the series causes the minuend to be too big: The decrease in sample size causes the distribution of values to becomes less spread out, strongly effecting the outlying 5\% value.\\
+The solution proposed above works well for constant behavior throughout the whole recording and generally if the systemic shift drops off before the $l-n$-th frame, that is, the last fitting position of the rolling window. However, it fails if the signal's bias drops off towards the end of the recording, in which case the algorithm implemented here would instead propagate the error into the last bin, where it was not present initially.\\
+This would result in a growing drop of signal intensity in the proximity of the end of the recording, thus introducing a systematic bias instead of removing it.
+In order to circumvent this, changing the window size works well: If the last viable position "detects" the lack of shift, it changes the minuend accordingly.\\
+As a consequence, relevant variables for this procedure are the percentile taken and, more importantly, the size of the window used for calculation of said value.\\
+Since quantile correction generally "smoothes" curvature in the signal, it is detrimental to longer-lasting transients\footnote{\emph{transient}: significant and sustained spike over a bin of frames in the trace}; if the transient's duration, and consequently elevation, is equal to or bigger than the window over which the quantile is determined, the value will scale accordingly and "push down" the transient.\\
+This would bias the algorithm against long-lasting transients, as the normalization would reduce their amplitudes.\\
+Therefore the bin size should be dependent on the frame rate used to capture the signal; a good range to be considered is in the range of one quarter of the pictures taken. \footnote{Example: 5000 frames captured at 30Hz $\rightarrow$ 8\% quantile of a bin of ~1250 frames deducted from the signal}\\
+For an example of the normalization, see Figure \ref{fig:driftCorrection}.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/driftCorrection}
+\caption{On top: raw trace of mean fluorescence values recorded. In the middle: applying quantile normalization (see below) removes the linear shift in values observed in the first part of the data, subtracted values in yellow. At the bottom: subsequently applying baseline correction (\ref{base}) expresses the trace in terms of baseline activity, facilitating the comparison of different cells.}
+\label{fig:driftCorrection}
+\end{figure}
+\subsubsection{Baseline Correction} \label{base}
+Outside of firing behavior, the neuron's ion pumps return the cell to its resting potential and ion gradient. This is visible in the data as the so-called \emph{baseline} signal intensity, which is stable w.r.t. time, albeit it exhibits white noise.
+Due to the numerous free variables involved in CNI mentioned previously, it is preferable to regard the data not as raw values but rather as change relative to the respective cell's baseline activity.\\
+While this intuitively facilitates comparability among neurons by reducing the data to activity changes, it is also a necessary step for the spike train recovery of cells. The reasons for this are the varying distances to the focal layer and generally different cell bodies and soma sizes.\\
+This is because the overall signal variance decreases along with the mean fluorescence with an increase in distance to the focal layer.\cite{mukamel_automated_2009}\\
+In other words, an elevated average of fluorescence activity does not necessarily equate a higher firing rate, the cell's signal change relative to itself is the determining factor.\cite{yaksi_reconstruction_2006}\\
+The aforementioned reasons aside, a relative activity approach is required due to the fact that the algorithm used in the present thesis relies on the shape of transients for event detection (for further elaboration of this, see section \ref{event}).
+If the differences in baseline activity, and corresponding transient amplitudes, were not accounted for, this would cause the sampled transients to exhibit y-axial shift relative to each other.
+It is thus necessary to account for the arising difference in amplitude, which neither changes the shapes of the transients, nor does it necessarily indicate a difference in  underlying firing activity.\\
+As a consequence, the extraction of a "common transient" would be difficult without normalization; see section \ref{kernel} for greater detail as to why this is critically important. 
+In order to express cellular $Ca^{2+}$-intensity relative to the cell's resting activity, we look for some reference to be used as the baseline, that is the fluorescence measured in absence of any spiking activity.
+This can intuitively be achieved by selecting the region of lowest variance within the time series. \\
+The actual normalization is achieved by dividing the time series by the mean of the baseline, hence expressing the signal relative to the neuron's inactive, non-firing,  fluorescence.\\
+Given time series $s$ of length $l$, baseline window size $n$ and a real list $x$ of observations (also of length n), the empirical mean $\mu$ and variance $\sigma^{2}$ of $x$ are defined as:
+\begin{align*}
+\mu(x) :=& \frac{\sum_{i=1}^{n}x_i}{n}\\
+\sigma^{2}(x) :=& \frac{\sum_{i=1}^{n} (x_i - \mu)^{2}}{n-1}
+\end{align*}
+A pseudo-code realization of the baseline correction for s is then:
+\begin{align*}
+baseline = \infty \qquad \quad &\\
+\texttt{for $j$ in $l-n$ do:} &\\
+& window:= (s_j,s_{j+1},..,s_{j+n})\\
+& \texttt{if } \sigma^{2}(window) < \sigma^{2}(baseline) \texttt\quad{do:}\\
+& \qquad\qquad baseline = window\\
+\texttt{return } \frac{s}{\mu(base)}&-1
+\end{align*} 
+In other words, moving over the trace is accomplished in much the same way as in section \ref{quant}, but this time while looking for the window position with the minimum variance instead.\\
+The time series is then divided by the mean value of the resulting baseline region, and 1 is subtracted from it. This last step causes the baseline regions of the trace to be centered around 0, which is preferable for subsequent steps of the algorithm (see section \ref{deconvo} for greater detail).\\
+Baseline correction preserves the \emph{shape} of the trace, while changing the scale. Aside from the need to do this in order to compare the activity levels of cells without the influence of non-AP related properties, comparison of different neuronal tissues, and species, is also facilitated by this step.\footnote{While this is generally true with regards to calcium amplitudes, keep in mind that transient durations and rise/decay dynamics vary heavily with the specific type of cells observed.}\\
+Due to the need for a distinguishable region of non-activity, this can be problematic for traces where no such stable periods are prevalent, as is the case in Figure \ref{fig:noBaseline} below.\\
+Here, it would be preferable to either reduce the size of the baseline window, so that it 'fits' in between two transient onsets, or manually select a region altogether. \\
+This sort of data is generally difficult to analyze however, since there is no guarantee whether true baseline activity is present in the trace. The cell may be exhibiting continuously elevated levels of firing activity, or none whatsoever.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\linewidth]{./ma_images/noBaseline}
+\caption{Fluorescence trace after baseline correction. The signal intensity expressed relative to the mean baseline activity is listed on the Y-axis, and negative in this case. This is due to the algorithm choosing the region between the two black dots as baseline, which in this case is clearly situated within a spike. Data supplied by Fani Koukouli, Institut Pasteur Paris.}
+\label{fig:noBaseline}
+\end{figure}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/noBaseline2}
+\caption{Another trace with no distinguishable baseline region. The data by \citeauthor{dana_sensitive_2016}\cite{dana_sensitive_2016}) includes simultaneous patch-clamp-recordings of firing activity, and contains a total of 351 spikes. Since fluorescence is at non-base levels throughout the entire recording run, the selected baseline, i.e. the region with the lowest variance, between the black dots, is at disproportionately high signal intensities. This causes the baseline normalization to 'suppress' the data; fluorescence change does not reach a two-fold increase w.r.t. the baseline signal. As such, the trace is very hard to deconvolve correctly.}
+\label{fig:noBaseline2}
+\end{figure}
+\subsection{Deconvolution} \label{deconvo}
+After normalization of the data, the following step is the extraction of the spike train underlying the observed trace; arguably the core piece of the algorithm.
+This process is called "deconvolution" because the time series can be regarded as a convolution of the different functions which constitute the total signal.
+The assumption is that the signal is composed of the firing activity trace and the calcium concentration response to it.
+Because the firing activity translates to the spike train, we are interested in de-convolving the signal: it allows us to single out the AP timings. 
+
+\subsubsection{Convolution Theorem}\label{convolution}
+In order to single out the spike train, the convolution theorem can be applied in the following way:\\
+Given two convolved functions $f\times g$, $\times$ being the convolution operator, and the Fourier Transform operator $F$, or $F^{-1}$ for the inverse Fourier Transform, the general form of the convolution theorem is\cite{arndt_pi:_2013}:
+\begin{align}
+F\{f\times g\}  = F\{f\}\cdot  F\{g\}
+\end{align}  
+and equivalently:
+\begin{align}
+f \cdot g = F\{F^{-1}\{f\}\times F^{-1}\{g\}\}
+\end{align}
+Using the above, we consider the fluorescence signal to be a convolution of alpha kernels $f$, and the spiking signal (i.e. activity) $g$. For now, it is sufficient to state that $f$ is a model of the signal recorded in response to a single AP; the method used to determine it from the data is elaborated in the following section.\\
+By refactoring (1) and applying the inverse Fourier Transform, we can extract $g$, given fluorescence trace $\{f\times g\}$ and kernel $f$ as:
+\begin{align}
+F\{g\} & = \quad \frac{F\{f\times g\}} {F\{f\}}\\
+g & = \quad F^{-1} \{\frac{F\{f\times g\} }{F\{f\}} \}
+\end{align}
+The extracted time series $g$ is the spiking signal. Since the end result should be binary, point-wise spike trains, an additional step is required: The biological $Ca^{2+}$-concentration dynamics are more complex than the non-physiological representation and simplification we are looking for; an action potential physically spreads through a neuron's cell body, consequently causing the signal to be spread spatio-temporally. We thus require an additional step to determine the actual spike timings, this is explained in \ref{timing assignment}.\\
+This approach to modeling and retrieving spike trains from CNI data is well known and has been successfully applied in multiple publications\cite{dombeck_imaging_2007}\cite{yaksi_reconstruction_2006}.
+\subsubsection{Determining the Alpha Kernel}\label{kernel}
+Since the convolution theorem applied in the previous section requires a kernel for its solution, identification of the fluorescence trace in response to a singular action potential is key to the algorithm: It is the $f$-term of the equation used for the deconvolution.\\
+Given such a single-AP profile, we can subsequently treat the signal as the convolution elaborated above, allowing for equation (4) to be solved and spiking activity to be isolated.\\ 
+A list of transients will be compiled in section \ref{event}; determining which of these were caused by an individual spike is thus the subsequent step.\\
+The shape of the transients can be used as a preliminary filter: Assuming the type of signal response we are looking for is caused by a single spike, its realizations can be expected to display similar patterns. This is because it is unlikely that a response to the same signal produces vastly different outcomes, and we consequently expect to find a somewhat consistent transient type.\\
+More specifically, the number of peaks is a strong indicator of the underlying activity. If no additional action potential started before the cell returned to its baseline fluorescence, the time series rises up to its peak amplitude and starts to decay thereafter, and we expect to observe a roughly triangular shape, see Figure \ref{fig:basic_transients} for a typical example.\\
+Removing all candidate transients not fulfilling this criterion from the list can accordingly be done with little need for justification. The one caveat is the possibility of multiple APs occurring within the time elapsed between two frames. This problem can be circumvented by the filtering the transients AUC(area under the curve); multi-AP traces yield significantly higher amplitudes and can thus be distinguished that way.\\
+Determining the number of peaks is done with a small subroutine which uses a Gaussian filter and then counts the number of slope reversals, each reversal signifying a peak.\\
+The transfer function\footnote{The transfer function describes the output a system (system being a transform applied to the signal, e.g. a filter) gives in response to any possible input.} $h(t)$ of a Gaussian filter is given by\cite{krystek_digitale_2004}:\\
+\begin{align*}
+h(t) &= \exp\lbrack{-\pi (\frac{\alpha\sigma}{t}})^2\rbrack\\
+\alpha &= \sqrt{\frac{ln2}{\pi}}\\
+\end{align*} 
+Note that while $\alpha$ is a constant, $\sigma$, from a probabilistic point of view, is the standard deviance of the Gaussian kernel and a free parameter. The higher it is, the stronger the input is "smoothed out" by the filter. The correct range of values for this parameter is consequently dependent on the noisiness of the trace, with stronger smoothing being required for noisier data. Generally, values taken from the interval $[4,9]$ are valid considerations, and have worked well in practice.\\
+This shape-changing behavior arises from the way the filter manipulates input signals: The further frequencies are away from the signal mean, the stronger their suppression. The exact amplitude of a specific frequency that passes through the filter is expressed as the filter's weight function. For a Gaussian filter like the one specified here, it takes the shape of a Gaussian bell curve whose spread is determined by $\sigma$. A wider spread thus results in a weaker filtering for input distanced from the mean, and vice versa.\\
+\begin{figure}[h]
+\centering
+\includegraphics[width=1\linewidth]{./ma_images/gaussian_smoothing}
+\caption{Example of 2 transient traces in blue and the output of a Gaussian filter and preceding calculation of moving averages with $\sigma = 7$ in orange. The following step of the method correctly labeled the transients as 3 and 2-peaked, respectively. Data by \citeauthor{dana_sensitive_2016}\cite{dana_sensitive_2016}.}
+\label{fig:gaussian_smoothing}
+\end{figure}
+The filtering is necessary because of the inherent noisiness of CNI data, longer-term signal change is often outweighed by the variance of adjacent data points. This complication is alleviated further by additionally binning over multiple values, e.g. a tenth of the total number of frames in the transient, and taking their mean, which is typically referred to as the \emph{moving average}.\\
+An algebraic representation of the moving average with window size $l$, given series $s = \{s_0,s_1,...,s_n\}$ of length $n$, is:
+\begin{align}
+\texttt{moving average}_l(s) := \{\frac{\sum_{i=0}^{l}s_i}{l}, \frac{\sum_{i=1}^{l+1}s_i}{l},...,\frac{\sum_{i=n-l}^{n}s_i}{l} \}
+\end{align}
+While this step crops the transient length by the size of the bin used, we only perform this action to determine the number of peaks and subsequently continue to consider all of the data in an unfiltered manner.\\
+A pseudo-code realization of the peak-counting method, using the moving average and Gaussian filter, as well as a \texttt{sign} operator,\footnote{The sign operator takes any real number and returns 1 for input $>=0$ or -1 for anything else.} is:
+\begin{align*}
+trace = \texttt{moving average}&(trace)\\
+trace = h(trace)\qquad\qquad&\\
+\qquad \texttt{for x in trace do:}\qquad&\\
+slope =&  \texttt{sign}(x-x_{previous})\\
+\qquad if (sign &\neq sign_{previous}):\\
+& peaks + 1\\
+return \lceil\frac{peaks}{2}\rceil\qquad\qquad\\
+\end{align*}
+Notice that the number of slope reversals does not equate to the number of peaks, which is attained by dividing by two and subsequently rounding the result up.\\
+The remaining candidates are all single-peaked, but their total durations and amplitudes can still vary significantly.\\
+As argued above, single-AP responses should be consistent, albeit within some variance.\\
+Hence, we expect to observe a normal distribution of transient times and amplitudes, and can reduce our selection to only those within some margin from the distribution mean.\\
+Extracting a kernel for the deconvolution is then done by calculating the mean transient of the remaining candidates and fitting an alpha function with the free parameters $A, t_A$ and $t_B$:
+\begin{align}
+f(t) = A \cdot e^{t/t_A} -  e^{t/t_B} 
+\end{align}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\linewidth]{./images/alphakernel}
+\caption{Example realizations of the alpha kernel for varying parameter values. The ranges of the free parameters depicted are: $A \quad \epsilon\quad [1800,2200]$, $ t_A \quad \epsilon\quad [80,140],$ $t_B\quad \epsilon\quad [25,50]$. Determination of the kernel used during runtime is accomplished by fitting parameters around these regions to the single-peak transients observed in the input. Notice that viable regions to be considered are largely dependent on the data at hand, and are expected to change with cell type, organism, etc. Since the algorithm samples from the recordings at hand and fits the kernel automatically, it can adapt to changes dynamically. See Figure \ref{fig:alphaKernelCai-1} for an in-vivo data-based example.}
+\label{fig:alphakernel}
+\end{figure}
+
+The weakness of this approach is its strong requirement for sufficient data.\\
+Sparsity of data, and according sparsity of transients, cause the set of viable samples for the kernel calculation to be small, or null, in the worst case.\\
+A small remedy is the relaxation of the criteria used for creating the kernel, which also resolves the null case.\\
+However, this essentially allows dissimilar traces to be used for the calculation of a signal which ought to be self-similar, and necessitates a rigorous control of the subsequent steps of analysis.\\
+It is recommended to use the algorithm with data where this problem does not surface.  
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\linewidth]{./ma_images/alphaKernelCai-1}
+\caption{Alpha kernels as determined by the algorithm. Transparent grey traces: single-peaked transients selected as templates. Blue trace: the mean trace attained by calculating the average template trace. Red trace: curve fit to the blue trace, which is the alpha kernel $f$. On the left: data from \citeauthor{akerboom_optimization_2012}\cite{akerboom_optimization_2012}, with $A,t_a,t_b$-values of 119.546, 38.207 and 38.017.
+On the right: Data from \citeauthor{chen_ultrasensitive_2013}\cite{chen_ultrasensitive_2013}, and $A,t_a,t_b$-values of 0.598, 104.401 and 5.622. The transients on the right exhibit a much steeper onset slope, showcasing the dynamic adaptation of alpha kernel $f$, depending on the input.}
+\label{fig:alphaKernelCai-1}
+\end{figure}
+
+\subsubsection{Spike Timing Assignment}\label{timing assignment}
+Action potentials, from a neuro-computational perspective, are a binary point-like signal. Aside from the fact that, biologically speaking, APs are spatio-temporally expressed signals, the resulting calcium concentration responses generally behave differently.\\
+As a consequence, it is now necessary to derive an estimate of the exact number of action potentials from our frequency evaluation, as well as their most likely timing of occurrence.\\
+The number of APs contained within a transient of $n$ frames can be estimated in a straight-forward manner as:
+\begin{align}
+|g| = \lceil\sum_{i=1}^{i=n}g\rceil
+\end{align}
+Given the number of spikes we are assigning to the transient, determining their respective timings can be done by taking a closer look at the frequency composition $g$.\\
+The peak values are the maximum spiking activity as returned by the deconvolution, and accordingly the most likely timings.\\
+Additionally, by differentiating between transients and regions of non-activity, the position of the first AP in each transient is a given: It is the start of the event, in response to which the calcium concentration initially increases.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/deconvolved_signal}
+\caption{Each set of graphs corresponds to transient data on top and the respective deconvolved signal $g$ below. The red dots highlight the timings derived from $g$. These are determined by distributing a $|g|$-amount of spikes over the trace (defined in (6)), which is done by assigning them to the maxima of $g$, highlighted with red lines. Data recorded by \citeauthor{akerboom_optimization_2012}\cite{akerboom_optimization_2012}.}
+\label{fig:deconvolved_signal}
+\end{figure}
+Especially for shorter transients, the sparsity of data points contained within the array passed to the deconvolution can cause the signal $g$ to oscillate quickly. This behavior can be alleviated by interpolating the input transient linearly.\\
+Linear interpolation simply connects data points with a line, or adds values along this line in the discrete case. 
+\subsubsection{AUC check}
+Another way to approach the deconvolution problem is by considering the volume of the transients, normed to start and end at zero.\\
+Using the previously single-AP-response trace, it is not far-fetched to treat the surface area $\int_{0}^{n} f$ of the kernel with length $n$ as the reference for a single transient.\\
+It is consequently unlikely for e.g. a transient with more than 4 times the surface area of the reference to be caused by only a single action potential.\\
+This idea can be used as a checking routine for the deconvolution method, both approaches should not be more than one AP apart.\\
+However, the AUC (Area Under the Curve) model scales unreliably with high activity, since calcium saturation and general diffusion dynamics cause the responses to maintained firing to not scale linearly.\\
+The same applies to essentially all CNI data, and is thus generally true, albeit the AUC check is affected more directly.\\
+While this procedure can generally be used to validate the deconvolution output, the provided script uses it as a simple check to filter out noisy transients which lack a significant surface area, which is the most reliable use.\\
+\subsection{Event detection}\label{event}
+As stated in \ref{base}, CNI data analysis generally depends on the presence of a determinable region displaying baseline activity. If this criterion is not met, relative fluorescence w.r.t. firing activity cannot be much better than a guess; there is no reference of non-activity to be taken advantage of.\\
+As a consequence, non-stationary data, by which I mean a permanently changing signal, is undesirable, the expected accuracy of deconvolution is low.\\
+Additionally, uninterrupted neuronal activity over the entire duration of measurement, which typically lasts several minutes, is unlikely.\\
+Consequently, it is reasonable to assume the presence of slices of data without any activity, which are generally irrelevant for analysis outside of baseline level considerations.\\ 
+Adding to this, it is computationally more efficient to pre-select transients, and perform the deconvolution routine on only those.\\
+Critically, the method implemented here to derive action potentials from the fluorescence uses the convolution theorem, and requires a \emph{kernel} function of what an AP looks like to be applied (see section \ref{convolution}).\\
+Thus, we require a strategy to obtain such a template, which we can achieve by selecting likely slices of data from the recordings we are analyzing.\\
+As a bonus, this step also simplifies the deconvolution procedure itself: The presence of an action potential in the specified region is a given, so we only have to check for the exact amount thereof and the respective timings.\\
+Transients are characterized by a significant and temporary rise in signal intensity.
+An alternative phrasing would be "region of interest", that is, slices of the data in which activity seems to be present, such that it is embedded within regions of the opposite, that is baseline fluorescence. Typically, any stretch of data with a somewhat consistent mean value, disturbed only by mean-0 normally distributed noise would be considered baseline activity, which hence lacks significant change in signal intensity.\\
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/basic_transients}
+\caption{Fluorescence trace obtained by selecting the pixels belonging to one cell soma in the raw imaging data, meaning over their luminosity per frame and applying baseline $ \frac{\Delta F}{F} $ normalization, baseline region indicated between the black dots. Frame number on the X-axis vs intensity relative to the baseline intensity on the Y-axis. The data exhibits three fairly typical transients, which have a triangular shape and a steeper onset than offset slope.}
+\label{fig:basic_transients}
+\end{figure}
+This characteristic transient onset rise is rapid albeit incremental, the signal does not "jump" up explosively but grows quickly. The decay following the peak signal intensity is fast initially but then decays exponentially in speed, giving the typical mono-peak transient (i.e. caused by one AP) an approximately triangular shape.\\
+The shortest transients last about 50 frames in 30Hz mouse mPFC data, while continuous spiking can feasibly lead to ongoing activity for the full duration of the experiment in any culture.\\
+\subsubsection{Threshold approach}\label{thresh}
+The perhaps most direct approach to identifying regions of interest in the time series is via straight-forward thresholding.\\
+\citeauthor{yaksi_reconstruction_2006}\cite{yaksi_reconstruction_2006} for example defined any occurrence above 2 standard deviations of the baseline as a transient, while the offset, i.e. the end of the transient, is set when the signal diminishes to 0.5 standard deviations or less from the baseline.\\
+In order to properly determine single-peaked transient shapes, defining the start of the event as the data point surpassing the threshold is undesirable, because it crops the starting region of template transients for determination of the kernel (see sections \ref{deconvo}, \ref{shape}).\\
+I thus included a small subroutine to check the trace preceding the event trigger, which determines the lowest point therein and labels the corresponding frame as the first frame of the transient onset.\\
+The general thresholding approach is advantageous due to it's simplicity: Anything "peeking" out is treated as potentially interesting.\\
+The disadvantage, however, is somewhat dire; the entire algorithm depends on the variance of the baseline.\\
+This causes the method to be quite susceptible to noise and lack of a clearly discernible baseline, thus requiring strong assumptions about the relation of base fluorescence and spike-induced luminosity amplitude. An example for data ill-suitable to thresholding is Figure \ref{fig:noBaseline}, accordingly.\\
+Consequently, the analysis sometimes fails to consider transients entirely, or conversely treats unreliable data as a region of interest.\\
+Regardless, a thresholding method for detection of transients is included in the library provided, albeit not in use in the script.\\
+It is in fact preferable to the computationally more expensive approach (see section \ref{runtime}) when the data consists of few large transients, separated well with interspersed regions of inactivity, which surpass the baseline in amplitude, although the algorithm described below performs well in this case, too.
+\subsubsection{Shape-dependent Transient Detection}\label{shape}
+Since the base assumption for CNI is that the signal changes in response to the cell's firing activity (see \ref{calcium}), it is reasonable to assume that APs cause a noticeable and local rise in the rate of change.  
+From an analytical point of view, this would be the first derivative of the time series.
+Because our recording however is a discrete series of samples taken from the underlying function plus some experimental noise, there is no model to analytically derive; instead, point-wise signal change can be calculated as the difference between neighboring data points. \\
+Assuming a presence of transients, i.e. non-empty data, we expect the distribution of such point-wise signal change, $\Delta F$, to be approximately normally distributed\footnote{When external factors remain stable, most biological measurements exhibit normal distributions. which applies to intracellular concentration values as well.\cite{schmidt_physiologie_2007}}, albeit with heavy tails on both sides.\\
+These heavy tails arise due to the fact that transient prevalence necessarily introduces outlying  $\Delta F$-values to the data at both sides of the range. This is because the $Ca^{2+}$-signal change in response to firing activity is fast and dynamic, and consequently lies outside of the random signal deviance.\\
+Accordingly, the distribution of $\Delta F$-values becomes more spread out in response to higher firing activity levels, resulting in heavier tails of the distribution.\\
+The idea utilized in this algorithm is that the signal change over frames corresponding to a transient onset have to lie within said tail of the $\Delta F$-distribution, and multiple frames exhibiting these high slopes are adjacent to each other over the duration of the signal increase, i.e. transient onset.\\
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\linewidth]{./ma_images/slopes}
+\caption{Data trace and the corresponding slopes over 3-frame distances. Highlighted in the grey boxes: Transients cause a noticeable oscillation in the distribution of slopes, and are thus well suited to be used as an indication of the presence of a transient.\newline
+The slope signal is visibly noisy, which is alleviated somewhat by calculating the moving average (equation 5) with the same rolling window size as used in the prior step.}
+\label{fig:slopes}
+\end{figure}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.8\linewidth]{./ma_images/noBaseline_slope}
+\caption{Depicting the same data as Fig. \ref{fig:noBaseline}, where the thresholding approach fails to label any regions as transients. Here: the slope-dependent method is robust w.r.t. lack of a clear baseline, as exemplified by the annotated transients in red.}
+\label{fig:noBaseline_slope}
+\end{figure}
+The method implemented here thus regards the distribution of slopes, choses a cutoff accordingly and marks regions where the threshold is met repeatedly as transients.\\
+It proved advantageous to disregard all slope-values situated below the 50\%-quantile of the resulting trace: They are necessarily small signal changes far removed from any AP-related $Ca^{2+}$-concentration dynamics, as well as the distribution's heavy tail of smaller negative values caused by transient decay.\\
+Removing them and selecting a threshold relative to the resulting distribution, which consequently includes the heavy tail defined by the bigger slope values created by transient onsets, helps to find a well-suited cutoff value. See Figure \ref{fig:shapeEventDetect} for a visualization of the threshold calculation.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/shapeEventDetect}
+\caption{Top: Fluorescence trace averaged over a cell and baseline normalized, with regions labeled as transients highlighted in red. Below: initial slope distribution of 3-frame bins determined from the data above indicated by the dashed red line, and a histogram calculated over all slope values above the 0.5 percentile in green. This additional step shifts the distribution towards the heavy tail on the right, where a suitable cut-off is then determined, typically at 2 standard deviations from the mean.}
+\label{fig:shapeEventDetect}
+\end{figure}
+
+Transient end timings can either be marked as the point of return to the signal strength present at the beginning of the offset or a slope consideration similar to the one used for signal onset determination.\\
+The most consistent results were achieved by disregarding the slope-dependent approach to terminating the offset, since it occasionally yields premature cut-offs in case of fluorescence saturation or generally large yet lasting transients: These types of data can display fairly consistent fluorescence despite remaining at elevated levels of signal strength.\\
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.5\linewidth]{./ma_images/eventDetect}
+\caption{General flow-chart of the slope-dependent transient annotation procedure. The method implemented in the API simultaneously performs quantile correction if called with the corresponding argument, which saves an additional iteration over the array, albeit it has no influence on the labeling process itself.}
+\label{fig:eventDetect}
+\end{figure}
+Accepting either of the return to baseline activity or the intensity recorded at transient onset turned out to be the most reliable: It guarantees a cutoff at baseline levels while also distinguishing spikes embedded in generally active slices of the trace.\\
+False positives can be reduced by calculating the rate of change over more distant points instead of directly between adjacent ones, since AP-related signal growth is approximately exponential over the starting frames during the transient's onset. White noise, however, is by definition random and consequently less likely to overcome said rise in signal the further it progresses.\\
+Simply put, the likelihood of 3 consecutive frames randomly showing a steep increase in fluorescence is smaller than it is for 2.\\
+The exact distance between data points considered is hence another parameter to be taken into consideration, with the general range being anywhere from 2 to the expected length of single-peaked transient onsets, which is thus dependent on the sampling rate as well as other experimental factors.\\
+Setting the bin size to 3 leads to favorable results in all testing performed, but might be susceptible to false positives for high frame rates ($>$50Hz), for which a higher value might be preferable.
+The same rolling window size is subsequently utilized for the calculation of moving averages of the signal-change trace, which is done in order to further reduce noise.\\
+An additional advantage of annotating transients via this procedure is the imposed requirement for a noticeable onset at the start.\\
+This is beneficial for the subsequent step of analysis: deconvolution.
+Straight-forward thresholding labels any elevated slices of the data, which leads to a variable set of small, non-shape consistent transients in the case of more noisy data, which negatively impacts the extraction of spike trains.\\
+This is circumvented with the method depicted above: We enforce a requirement for some shape-consistency between transients, that is the presence of a noticeable onset. For an example of the different kernels derived from the approaches, see Figure \ref{fig:alphaKernels_slopeAndThresh}.\\
+Figure \ref{fig:eventDetect} depicts a flow-chart representation of the slope-dependent algorithm.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/alphaKernels_slopeAndThresh}
+\caption{The grey transparent lines are individual transient traces, selected by either thresholding (left side) or the slope-dependent approach (right side).\newline
+The curve fit (in red) to their mean trace (in blue) is the resulting alpha kernel used in the deconvolution (see section \ref{deconvo}).\newline
+Data depicted in the top row: anesthetized mouse visual cortex recordings with jRCaMP1, below: same setup with dye jRGECO1a, by \citeauthor{dana_sensitive_2016} \cite{dana_sensitive_2016}. Note the problematic alpha kernel derived from the thresholding method, which arises due to their intrinsic need for a certain minimum signal amplitude to detect transients. This results in a non-curved template function (in blue), causing a bad kernel fit. Utilizing such a function for the deconvolution routine generally decreases accuracy, making it an undesirable outcome.
+}
+\label{fig:alphaKernels_slopeAndThresh}
+\end{figure}
+
+\section{Results}
+\subsection{Availability \& Requirements}
+All of the code is published under the GPL(general public license) and is openly available on \href{https://github.com/zmoldir/cal_neuroim}{\textcolor{blue}{GitHub}}\cite{noauthor_gnu_2007}.\\
+The algorithm was written with python 2.7, the dependencies are the \href{https://www.scipy.org/}{\textcolor{blue}{SciPy}}\cite{oliphant_python_2007},  \href{http://pandas.pydata.org/}{\textcolor{blue}{Pandas}}\cite{noauthor_pandas:_nodate} and \href{http://www.numpy.org/}{\textcolor{blue}{NumPy}}\cite{walt_numpy_2011} libraries, which are standard tools for scientific computing in python.\\
+Testing was performed on 32 and 64-bit Unix kernels as well as Windows 7 and 10, and the API performs normally with a python 3.2 interpreter. \\
+The repository contains a runnable script called "main.py" and a second file containing the API's functions, "cal\_neuroIm.py".\\
+An additional ipython notebook is in the github repository, and is
+titled "simroutine.ipynb". It mostly contains code for data simulation, visualizations and extracting data from several file formats, such as .mat.\\
+%TODO: add more to this brief intro
+\subsection{Performance}
+In order to assess the accuracy and reliability of the method, I simulated data by randomizing the free parameters of an alpha kernel, total transient duration and total number of action potentials in the trace.\\
+More specifically, I modeled baseline activity as centered around mean 400 with normally distributed noise of mean 0 and $\sigma = 80$, while AP timings were randomly distributed over the series without any rules preventing overlap of transients. Single AP responses were thus simulated by randomizing the parameters of the alpha kernel (see section \ref{convolution}): $$f(t) = A \cdot e^{t/t_A} -  e^{t/t_B} $$
+Notice that transient length $t$ is another parameter to be randomized. The respective mean and standard deviance of the normal distributions sampled from were: $\{\sigma_t = 120, \mu_t = 400\},\{\sigma_A = 120, \mu_A = 2000\},\{\sigma_tA = 30, \mu_tA = 120\}, \{\sigma_tB = 10, \mu_tB = 40\}$.\\
+These ranges were well within those observed in unpublished data by Fani Kokuli (Institut Pasteur, Paris), albeit transient characteristics are generally expected to vary strongly w.r.t to the cell type and specimen at hand\cite{mukamel_automated_2009}(see Figure \ref{fig:alphaKernelCai-1}), but retain some consistency grouped as such.\\
+Additionally, a fully annotated dataset including cell-attached spike measurements with simultaneous CNI was made available by the CRCNS data sharing program(Collaborative Research in Computational Neuroscience)\cite{noauthor_welcome_nodate}\cite{teeters_data_2008}.\\
+The first part of the set consists of two separate imaging runs from the L2/3 primary visual cortex of mice, and captured 11 and 10 cells, respectively.\\ 
+It contains simultaneous CNI and cell-attached current clamp measurements, and was made available by Dana et al \citedate{dana_sensitive_2016}. Akerboom et al\cite{akerboom_optimization_2012} and Chen et al\cite{chen_ultrasensitive_2013} conducted  experiments on a diverse range of cells, among which are in vitro astrocytes and mouse retina, in vivo drosophila adult antennal lobe cells and larval neuromuscular junction, mouse visual cortex as well as zebrafish retina and tectum recordings. In total, their shared data provided an additional 5 sets of recordings with simultaneous patch-clamp measurements.\\\\
+%TODO: show diversity of the data set
+\subsubsection{Temporal resolution}\label{temp}
+It should be noted that at its core, calcium dynamics lack the speed to be useful for capturing AP timings at an accuracy necessary for precisely timed analyses.\\
+This is apparent when regarding the sampling rates typically used for CNI: It reportedly does not make sense to use frame rates above 50Hz, because no significant changes in fluorescence are observed between images\cite{orbach_optical_1985}\\
+An action potential, however, typically lasts less than 10 milliseconds; if one considers the refractory period to be part of the AP\cite{nover_lehrbuch_2005}.
+As a consequence, even in the best case scenario (that is a small, recurring transient surrounded by stable baseline activity, most likely indicating a single burst of action potentials), it is still not possible to determine when exactly between the two frames surrounding the transient onset the action potential was triggered. It is thus an inherent property of CNI that the best temporal resolution possible is determined by the frame rate. Common capturing frequencies like 17Hz take a picture every 58.8ms, which is their smallest distinguishable time difference.\\
+The much more frequent case is accordingly less suitable for precise timing analysis: I am referring to traces with continuous spikes, were it is very likely that multiple APs overlap within a singular transient, meaning that no region of baseline activity separates the transients.\\
+In these cases, general development of overall activity is well captured regardless, and the data can be deconvolved with regards to it. However, determining the exact number of spikes with sufficiently precise timings becomes hard. High-activity data with a corresponding density of APs reduces the accuracy of the deconvolution.
+Technically, the algebraic approach implemented here provides exact timings, but it is advisable to interpret these as an indicator of general change of activity instead. One such method would be to regard firing rates over time bins, and deriving the change of activity.  Two examples of this are presented below, which use heat maps to visualize activity patterns in the captured neurons, see Figure \ref{fig:heatmap_9cell12} and \ref{fig:heatmap_11cell13}.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/temporal_resolution_CHEN}
+\caption{From top to bottom: fluorescence signal recorded in a cell, deconvolved spike train, and spike train as recorded via patch-clamp. Note that while the deconvolution method yielded roughly half the total amount of action potentials as annotated via patch-clamp, the pattern of activity, and change thereof, are almost identical. Data from \citeauthor{chen_ultrasensitive_2013}\cite{chen_ultrasensitive_2013}.}
+\label{fig:temporal_resolution_CHEN}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/temporal_resolution_akerboom}
+\caption{Same depiction as Figure \ref{fig:temporal_resolution_CHEN}, but with data from \citeauthor{akerboom_optimization_2012}\cite{akerboom_optimization_2012}. The deconvolution method missed smaller prevalence of activity in between bigger transients, and underestimates the number of spikes contained in these. However, as before, the distribution of activity derived from it very closely resembles those retrieved via patch-clamp.}
+\label{fig:temporal_resolution_akerboom}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.5\linewidth]{./ma_images/heatmap_9cell12}
+\caption{One layer on the horizontal axis corresponds to one ROI in the recordings, while color intensities ('hotter' $\rightarrow$ higher) encode firing rate relative to the maximum value deconvolved. On top: electro-physiological recordings, below: deconvolved activity from the imaging run. The frame rate used for capturing data is 17Hz\cite{akerboom_optimization_2012}. Data from \citeauthor{akerboom_optimization_2012}\cite{akerboom_optimization_2012}. Note that the second to last row corresponds to the data depicted in Figure \ref{fig:temporal_resolution_akerboom}; the set consists of 9 annotated cells captured over 12000 frames.}
+\label{fig:heatmap_9cell12}
+\end{figure}
+
+Figure \ref{fig:heatmap_9cell12} displays relative activity of a cell within a trace, and shows deconvolved (below) and patch-clamp-recorded firing rates over 460 frame bins.\\
+It is apparent that the CNI deconvolution approach generally yields less activity than its cell-attached counterpart. \\
+This is especially true for continuous spiking: Long, fairly homogeneous stretches of activity are de-emphasized by the deconvolution method.\\
+Detecting an onset of activity in response to e.g. a stimulus, or conversely a suppression of such, is well possible however.\\
+Figure \ref{fig:heatmap_11cell13}, showing a similar heat map of the data generated by \citeauthor{chen_ultrasensitive_2013}, exhibits comparable properties, as lasting stretches of moderate activity are generally underrepresented.\\
+Regarding the data on a second-scale for visualization, by binning activity in the heat map over 4s windows, conserves patterns of firing rate changes well.
+\begin{figure}\label{fig:correlation_to_bins}
+\centering
+\includegraphics[width=0.7\linewidth]{./ma_images/correlation_to_bins}
+\caption[Caption for LOF] {Correlations of the deconvolved spike trains with ones derived from patch-clamp recordings, which are the gold standard for AP detection. Due to the difficulties with achieving frame-wise precision mentioned in this section, direct comparison of the two traces generally yields very low scores and is barely informative\cite{theis_benchmarking_2016}. Depicted here is thus the varying degree of Pearson-correlation w.r.t. binning AP activity over changing bin sizes. The left-most  position on the x-axis depicts a total of 100 bins distributed over the traces (by \citeauthor{akerboom_optimization_2012}\cite{akerboom_optimization_2012}), corresponding to roughly a 2.8-second window, while the right-most coordinate shows 114ms. One trace corresponds to the varying correlation values w.r.t. bin size of one individual cell. As is to be expected, higher temporal scrutiny decreases the correlation of the two methods, whereas an increase in bin size reveals strong similarity over all sets of data. The mean score of all traces depicted is marked with grey triangles. Assuming a correlation coefficient of 0.4 to be satisfactory\cite{theis_benchmarking_2016}, reducing bins below a 50ms-window is not feasible, while the ranges above this value can be considered reliable. Note that some traces consistently exhibit better scores than others, which is likely due to a clearer distinction between transients and baseline regions, i.e. clearer data.
+The temporary drop in some regions of trace scores is likely due to local spikes in activity, which, at the corresponding position, are divided over several bins. The score subsequently rises above its previous level because the higher resolution partitions the local spikes over  multiple bins, thus circumventing the problem.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/heatmap_11cell13}
+\caption{Similar to \ref{fig:heatmap_9cell12}, with each cell/ROI on a horizontal axis. left: electro-physiological measurements, right: deconvolved CNI activity. All firing rates expressed relative to the maximum encountered in each respective cell. Data from \citeauthor{chen_ultrasensitive_2013}\cite{chen_ultrasensitive_2013}. Note that the first row corresponds to the data depicted in Figure \ref{fig:temporal_resolution_CHEN}, meaning 14000 frames recorded at 17Hz.}
+\label{fig:heatmap_11cell13} 
+\end{figure}
+
+\subsubsection{Accuracy for measuring overall activity}\label{accuracy}
+As mentioned in \ref{temp}, data with small, distinct burst of activity is the easiest to analyze, and the number of action potentials observed within one ROI/cell can be expected to be accurate.\\
+More densely packed activity, consequently, increases the difficulty of gaging the amount of spikes.\\
+Accordingly, one has to consider the data at hand when using CNI to look at the total amount of spikes in a cell, for the reliability of such an analysis is quite variable.\\
+Generally speaking, deconvolution of CNI data tends to yield lower amounts of APs than electro-physiological methods, which is a well recorded behavior.\cite{orbach_optical_1985}\cite{hofer_differential_2011}\\
+It is important to keep the similarity of data in mind, however: comparing overall activity between cells of the same species and type, with less signal-type determining parameters changed (e.g. knockout or stimulus), is not only possible but can be expected to yield high accuracy.\\
+For testing, I simulated 5 sets (of 20 ROIs with a recording length of 20000 frames) and a 10\% total AP increase contained between sets, respectively.\\
+The selected values for action potentials were chosen such that they assess the accuracy over different densities of data, ranging from a set with 25,28,31,34 and 37 APs per ROI, resulting in sparse and distinct transients, to heavily overlapping traces with 200,220,240,260 and 280 APs contained. See Figure \ref{fig:simdata}.\\
+All free parameters were left at default values for the tests, and each test repeated five times (that is, 5 sets of data were generated for each number of APs, totaling 5*5*5 = 125 sets with 20 ROIs each).\\
+Two realizations of these simulated traces are shown in Figure \ref{fig:simdata}, the corresponding accuracy assessments are displayed in the table below.\\
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.7\linewidth]{./ma_images/simdata}
+\caption{Top: simulation of sparse data, containing 20 APs. Bottom: simulation of dense data, featuring 280 APs. As before, regions labeled as transients are highlighted in red, with non-transient trace in blue. While the data on top is relatively easy to deconvolve, achieving good accuracy for the bottom one is hard.}
+\label{fig:simdata}
+\end{figure}
+
+\begin{tabular}{|c|c|c|}
+\hline \rule[-2ex]{0pt}{5.5ex} Base set AP num & Total AP/Deconvolved AP&  Ordering preserved\\
+\hline \rule[-2ex]{0pt}{5.5ex} 25 & 0.95(+/- 0.13) & 5/5 \\
+\hline \rule[-2ex]{0pt}{5.5ex} 50 & 1.14(+/- 0.08) &  4/5 \\ 
+\hline \rule[-2ex]{0pt}{5.5ex} 100 & 1.43(+/- 0.09) & 2/5 \\ 
+\hline \rule[-2ex]{0pt}{5.5ex} 150 &  1.87(+/- 0.11) & 1/5 \\ 
+\hline \rule[-2ex]{0pt}{5.5ex} 200 & 2.20(+/- 0.21) & 0/5 \\ 
+\hline 
+\end{tabular} \\\\
+The general behavior observed is that an increase in transient density, and according rise in overlap, causes the procedure to underestimate the number of action potentials in the trace.\\
+This is because the permanent activity causes the calculation of the alpha kernel to be overly conservative. When all distinguishable reference slices of data contain multiple overlapping transients, it is increasingly harder to retrieve single-peaked references.\\
+The data used for calculation of the deconvolution kernel consequently consists of multi-AP response traces, causing the method to produce a lower amount of total firing activity.\\\\
+A 10\% margin of activity between groups of cells can reliably be detected, given suitable data. Conversely, it should be kept in mind that less easily deconvolvable traces should be treated with care, by e.g. only considering bigger difference margins as indicative of an underlying change, or changing some of the algorithm's free parameters.\\
+Repeating the same trial but with a 20\% margin between 'runs' in-set yields the following:\\\\
+\begin{tabular}{|c|c|c|}
+\hline \rule[-2ex]{0pt}{5.5ex} Base set AP num & Total AP/Deconvolved AP&  Ordering preserved\\
+\hline \rule[-2ex]{0pt}{5.5ex} 25 & 0.92(+/- 0.1) & 5/5 \\
+\hline \rule[-2ex]{0pt}{5.5ex} 50 & 0.91(+/- 0.01) &  5/5 \\ 
+\hline \rule[-2ex]{0pt}{5.5ex} 100 & 1.31(+/- 0.03) & 4/5 \\ 
+\hline \rule[-2ex]{0pt}{5.5ex} 150 &  1.63(+/- 0.05) & 4/5 \\ 
+\hline \rule[-2ex]{0pt}{5.5ex} 200 & 1.89(+/- 0.06) & 2/5 \\ 
+\hline 
+\end{tabular}\\
+\\
+As expected, increasing the AP margin between runs leads to a significant improvement for the ranking accuracy of comparing the sets, while it has little to no impact on the precision of the AP number deconvolved.\\
+Sparse data yields better results when increasing the slope-cutoff for the event detection and window size considered for the calculation thereof.\\
+The number of APs selected for accuracy assessments are by no means applicable to the method in general, but rather heavily reliant upon the underlying single-AP kernel. The model used here took parameters from transients observed in mouse mPFC pyramidal neurons; data featuring either shorter or longer bursts of fluorescence would increase or lower the optimal range for the technique.
+\subsubsection{Runtime} \label{runtime}
+The algorithm runs in a single process. This means that launching the script multiple times with independent sets of data will cause the operating system to assign different processes automatically, executing them in parallel. This may not be true in the case of a distributed system, but holds for Unix-based operating systems as well as Windows.\\
+A 100mb set of data, which corresponds to roughly 6 million total float values stored in UTF-8, distributed over multiple ROIs or cells, takes 2 minutes to complete, using an Intel i5 second generation processor with 4 2.60GHz CPUs and 4GB RAM. These system specifications are below an average desktop computer, and the script can be run once per core (depending on the operating system), meaning this time is quartered if the input is partitioned accordingly.\\ 
+Performing the same test on the data used for accuracy assessments above, the runtime for the 112 cells of about 53000 frames or 1180000 float values is 45.7 seconds total, or roughly 1100 frames per second. Since the data is naturally divided into 5 sets, it is possible to launch a separate process on each core, which further reduces the time required to completion.
+
+\subsection{Running the Script}
+The script is intended to be run from a terminal.\\
+In order to invoke a python program, find the path to the corresponding file (main.py in this case), and start the call with "python main.py" - this tells your python interpreter to run the code contained in the file listed as the second argument.\\
+Input files should be in CSV format(comma-separated values), with one floating point value corresponding to the average fluorescence of a cell in that frame. As elaborated in section \ref{annotation}, this requires preceding cell annotation of the recordings, for which a multitude of algorithms are available.\\
+The files can list cells vs. frames either row or column-based, and recording lengths do not have to contain identical frame numbers.\footnote{Input of varying total recording length causes the shorter recordings to be padded with zeros. This is because the API utilizes algorithms optimized for matrix calculus, and thus requires arrays of the same length. A "divide by zero"-warning is thus printed when the script is used with such input; it does however not change the API's behavior.} 
+Data contained within one file is pooled for generation of the alpha kernel, whereas separate files fed into the algorithm simultaneously generate one kernel per file. Input should thus be compiled according to similarity, and combining different cell types, sampling rates or dyes in a file is not recommended. Combination of similar recordings, on the other hand, increases the amount of transients sampled for the kernel, and causes a higher reliability of the method. \\
+A minimal example of the syntax for calling the tool via a terminal:
+\begin{mdframed}[backgroundcolor=black] 
+\color{green}{$>>$ python /path/to/script/main.py InputFile}
+\end{mdframed}
+The script \emph{main.py} is called with a preceding \emph{python} statement. Multiple input files can be listed, and data contained within one file is pooled for calculation of the alpha kernel. The output directory specified is optional: if none is supplied at run-time, files are put in the directory the script is called from. Keep in mind that directory syntax as well as general string formatting issues depend on the operating system.
+The subsequent arguments should be one or several input files containing the data, followed by a path to the directory which the output should be written to, resulting in the following syntax:
+\begin{mdframed}[backgroundcolor=black] 
+\color{green}{$>>$ python main.py File1 File2 /path/to/output/directory/}
+\end{mdframed}
+Depending on the operating system, file paths can either be relative to the current working directory (Unix/Windows), or have to be complete.\\
+It should be noted that all parameters outside of the actual input files have default values, which is why the script can be called without specifying anything else.\\
+Nonetheless, it might be advantageous to change some of the parameters of the analysis, with the most crucial ones being whether quantile correction (see section \ref{quant}) should be applied, as well as selecting a fitting window size for the baseline. The syntax for changing these variables\footnote{The default baseline argument looks for a a 300 frame window to calculate the baseline activity.} is:
+\begin{align*}
+-q & \qquad \text{quantile bin size integer} \\
+-b & \qquad \text{baseline bin size integer}
+\end{align*}
+Anything roughly in the range of one tenth of the total number of frames works, unless the data exhibits permanent activity and no clear baseline of that size can be determined - in which case the deconvolution in its entirety is very hard, and results have to be rigorously checked.\\
+As elaborated in section \ref{quant}, the bin considered for quantile normalization should not be too small, or resulting suppression of transients is to be expected. The default for this parameter is 0, no quantile normalization is done unless specified otherwise.
+This is because it is only necessary in order to correct for drift, and should not be applied unless necessary.\\
+Should that be the case, supplying data slices ranging from one sixth to one third of the total time series should suffice in order to remove drift from the data.\\
+Other free variables are the number of adjacent frames considered for slope calculations, the amount of consecutive threshold hits required for a transient onset to be declared, the minimum length (in frames) a transient should exhibit, and the distance from the slope distribution mean at which the cutoff for transient detection is located (in standard deviances). The triggers for runtime modification of these are:
+\begin{align*}
+-s &\qquad\text{distance between frames considered for the slope calculation(integer)}\\
+-c &\qquad\text{slope threshold location relative to slope distribution mean(float)}\\
+-m &\qquad\text{minium number of data points above transient start fluorescence(integer)}\\
+-n &\qquad\text{number of consecutive frames required to be above the baseline(integer)}
+\end{align*}
+All of these have default values which worked well for mouse visual cortex mPFC data, but can be adjusted via command-line at will. \\
+Two additional parameters, -o and -s, are used to specify where to store the \underline{o}utput and which character is used to delimit(\underline{s}eparate) values in the input file.\\
+Regarding a bigger distance between data points for calculation of slopes causes lower susceptibility to noise, at the cost of decreased sensitivity. Bigger margins flatten the slope values, and are comparable to a floating average in their behavior. The minimum length (-n) for transients behaves in a similar way; longer transient requirements remove short stretches of data from the list compiled for ongoing analysis. This also applies to an increase of the -m parameter, which determines the amount of consecutive slope points above threshold required in order to declare a transient onset.\\
+Consequently, the n,m and s parameters have default values in their lower range, where they do not hinder sensitivity. If not changed during runtime, slopes(-s) are calculated directly from neighboring values, transients shorter than 10 frames are discarded (-n) and 3 consecutive slope values have to be above the threshold (-m).\\
+The parameter changed with -c behaves slightly differently. It determines the exact value of the threshold, which is calculated as the standard deviance of the distribution, explained in Figure \ref{fig:eventDetect}, times this parameter. Unchanged, it is defaulted to 2, lowering it allows less steep onset slopes to be labeled as transients, while higher values do the opposite.\\
+Here is an example for the syntax used when changing multiple parameters:
+\begin{mdframed}[backgroundcolor=black] 
+\color{green}{$>>$ python main.py InputFile -q 1500 -m 10 -n 5 -c 2 -s 3}
+\end{mdframed}
+Notice that their ordering is arbitrary, but the input file/s are obligatory and have to precede any other statements, placing them right behind the script name \emph{main.py}.\\
+If the syntax used to call the script is incorrect, it prints a brief explanation of how it is supposed to be invoked to the terminal and exits.
+\subsection{CIDA Main Components}
+The command-line tool explained above is little more than a top-down list of functions contained within the "cal\_neuroim"-module and argument parsing / file reading routines.\\
+All of the methods are thus intended to be used for writing new analysis programs. The fastest way to achieve this is putting the file "cal\_neuroim.py" in the same directory as the new script and calling its functions directly, or adding the module to the python directory.\\
+In order to get a general idea as to how the functions are called, let us take the code from "main.py"(the script) as an example.\\
+It should generally be noted that methods starting with an underscore (\_) are being called from higher-level functions and were generally not intended to be used on their own.
+\subsubsection{importMatrix}
+This function reads the file located at the supplied path, which should contain a time series' raw values column-wise.\\
+The second argument tells the function what separator is used to distinguish entries if the file is in csv-format (human-readable encoding), or treats it as an xlrd file if no second argument is supplied or it is null.\\
+It checks if all input recordings are of the same length, and pads the shorter ones with zeros if this is not the case.
+The function was written for convenience's sake, and it turns a time-series file into a numpy ndarray object. If your data already fulfills this condition, importMatrix is not needed: File imports are generally very straight-forward in python.
+\subsubsection{eventDetect}
+This method is the core piece of the API, and its performance is critical for robust and reliable analysis.\\
+If supplied with a non-zero quantile width argument, eventDetect performs quantile normalization at the same time as transient annotation; which saves an iteration over the data.\\
+If quantile normalization should be done separately, an additional function called quantileNorm is available in the script.
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/flowChart_eventDetect}
+\label{fig:flowChart_eventDetect}
+\end{figure}
+Most of the free parameters (s,c,m,n,q) that can be adapted at run-time are for this function. Depending on their values, the algorithm moves along the specificity- sensitivity trade-off axis, by enforcing increasingly strong requirements for a slice of data to be considered a transient.\\
+The return value is a tuple containing 3 items: transients, a matrix of the quantile normalized values and the distribution of slopes calculated from each time series.\\
+The last two are not used for any further analysis, but rather serve for visualization and checking whether the corrections were appropriate and the slope threshold reliable. The first item returned is the list, or list of lists, depending on the input dimension, of transients.\\
+An alternate procedure is contained in the library, which uses the thresholding method explained in section \ref{thresh}; it is called "thresholdEventDetect". It takes less optional parameters due to the thresholding procedure being more straight-forward in its approach. It also accepts a cutoff-parameter and a minimum transient length requirement, as well as a quantile window if the normalization should be performed. The return values are the same as for the slope-dependent method, minus the slope distribution.
+\subsubsection{The Transient Class}
+While the class itself is called "\_Transient", and accordingly not intended to be called directly, the eventDetect method explained above returns a list of lists of objects of this class.\\
+Upon being flagged as a region of interest by the event detection, the corresponding slice of data is passed to initialize a transient-object.\\
+Each instance of these contains the following properties:\\
+Start and end time, relative to the data (i.e. the frames determined to be the start and end of the activity), amplitude, rise and decay time, number of peaks, the normalized data constituting the transient and the total number of frames it lasted.\\
+Keep in mind however that eventDetect returns a list of lists of these transient objects - one list of transients per cell, which are themselves each an entry in a list of the cells. So passing 4 traces, or cells, to the method would yield 4 lists of variable lengths: The number of transients contained within the recorded cells are not expected to be identical, or even similar.
+\begin{figure}[H]
+\centering
+\includegraphics[width=1\linewidth]{./ma_images/flowchart_transientClass}
+\label{fig:flowchart_transientClass}
+\end{figure}
+
+\subsubsection{pushToBaseline}
+As the name implies, this is the method for baseline correction of the data.\\
+Contained within are calls to several sub-functions also found in the library, such as the identification routine of the region to be used as the reference baseline.\\
+It takes the data to be normalized and the length of the window which is used to determine the baseline. It returns a tuple of the normalized data matrix and a list of coordinate tuples, which specify the first and last frame number of the region used as baseline. The first element of the output tuple is thus the NxM or Nx1 matrix of data, and a list of coordinate tuples of length M.\\
+See section \ref{base} for reference.
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.6\linewidth]{./ma_images/flowchart_baselinecorrection}
+\label{fig:flowchart_baselinecorrection}
+\end{figure}
+
+\subsubsection{createMeanKernel}
+This method is invoked with a list (or list of lists) of transients, as returned by eventDetect or its thresholding counterpart.\\
+It subsequently iterates over the number of peaks parameter stored in the transients, and compiles a list of those that are single-peaked. This list is then used to calculate the respective amplitude, rise and decay time distributions.\\
+These ranges are needed to compute the "mean transient", as explained in section \ref{kernel}.\\
+The resulting time series is fitted to the alpha function, which is the methods return value:
+An ndArray containing the alpha kernel, of the size of the number of frames contained in the data.\\
+Because the alpha kernel is as long as the longest transient contained in the template list, which in turn is composed of non-outlier transients, there are cases where the kernel array is shorter than the data slice to be deconvolved. The function automatically extends the kernel in this case.
+\begin{figure}[H]
+\centering
+\includegraphics[width=1\linewidth]{./ma_images/flowChart_meankernel}
+\label{fig:flowChart_meankernel}
+\end{figure}
+
+\subsubsection{Deconvolve and \_generateSpiketrainFromSignal}
+Deconvolve requires a list (or list of lists) of transients and a kernel time series (as created above) to be used for the deconvolution.\\
+It then applies the convolution theorem (section \ref{convolution}) to extract the spiking signal.\\
+The function's output is an ndArray initialized with zeros; the data points which previously held activity are replaced by the deconvolved signal.\\
+The script then passes the derived activity measure directly to \_generateSpiketrainFromSignal, which determines how many spikes to assign to which frames; this algorithm is further described in section \ref{timing assignment}.\\
+The final output, used for generating plots in the "main.py"-script, is a binary \{0,1\} array depicting the presence of spikes in a frame-wise manner, each row corresponding to one ROI of the initial input.
+\begin{figure}[H] 
+\centering
+\includegraphics[width=0.9\linewidth]{./ma_images/flowChart_deconvolve}
+\label{fig:flowChart_deconvolve}
+\end{figure}
+
+\section{Discussion}
+The approach to spike train extraction from CNI data presented in this thesis can be expected to achieve good results in a quick and easy-to-use manner, unless one of the following two situations arises:\\
+In the case of data sparsity, a lack of sufficient transient samples causes the kernel to be derived from small sets of data. The consequence of this is that the kernel is not very reliable, and it is essentially unclear whether a good template was found. The result is that the validity of the method is reduced. Circumventing this problem can be done by simply adding more data to the analysis, or creating the kernel with another method.\\
+Alternatively, separation of transient regions vs. baseline activity can be hard, which also prevents the extraction of a good kernel function. This case is generally hard to deconvolve, however: Temporally unstable data does not allow for a clear distinction of states of activity versus inactivity, making any attempt of spike train extraction difficult, an example of which is shown in Figure \ref{fig:undeconvolvable}.\\
+Outside of the two cases listed above, the deconvolution approach implemented here works reliably and with good temporal resolution, as shown in section \ref{accuracy}.\\
+However, numerous alternative ways of extracting spike trains have been published; taking a closer look at their specifications is in order.\\
+Generally speaking, the existing methods can be split into the following categories:
+algebraic deconvolution\cite{yaksi_reconstruction_2006}\cite{friedrich_fast_2017}, which the algorithm implemented here classifies as, probabilistic inference using some underlying model\cite{ranganathan_optical_2010}\cite{sasaki_fast_2008}\cite{vogelstein_spike_2009}\cite{deneux_accurate_2016}, template matching\cite{kerr_imaging_2005}, clustering\cite{ozden_identification_2008}\cite{romano_integrated_2017} and machine learning approaches\cite{theis_benchmarking_2016}.\\
+The best correlation values relative to varying bin sizes are reported by \citeauthor{theis_benchmarking_2016}\cite{theis_benchmarking_2016}, and were derived from a supervised test set including the one used in section \ref{accuracy}. In summary, they train a modified Poisson-distributed generative model and subsequently calculate a Bayesian maximum likelihood estimate.\\ 
+While this approach yields the highest accuracy reported so far, it requires a significant amount of computational time, which is typical behavior for parameter-optimization based methods. Using such a framework also further increases the need for sizable amounts of data: the algorithm requires supervised sets of data to be trained with, preferably hailing from a similar recording type as the one to be analyzed\cite{theis_benchmarking_2016}. It is possible to use the method with a pre-trained model, but this arguably restricts the applications of the algorithm to recordings which exhibit similarity to the one used for training. Generalization of the method is generally difficult.
+This trade-off of generalizability, computational cost and precision is a general trend throughout data science\cite{agarwalalekh_computational_2012}, which is why the most accurate method is not necessarily the best choice for data analysis. \\
+Additionally, there is a significant difference in usability: it is not standard for publications focusing on the presented algorithm to make their code available. Furthermore, the vast majority of published methods is implemented in matlab only\cite{sasaki_fast_2008}\cite{vogelstein_spike_2009}\cite{deneux_accurate_2016}\cite{ozden_identification_2008}\cite{romano_integrated_2017} or comes without any implementation\cite{kerr_imaging_2005}\cite{ranganathan_optical_2010}.
+This is problematic for two reasons: \\
+To begin with, matlab is not publicly available, but privately owned and for-profit. This means that any publication implemented in their script language is locked behind the need to buy a subscription, the cheapest version of which starts at 2000 Euro\cite{noauthor_new_nodate}. 
+There is a the large body of publications focusing on scientific computation methods, which are typically funded by governmental grant programs, meaning they are financed by the public. It is thus counterproductive to require the purchase of an expensive corporate-held software in order to apply them. An institution-wide Matlab license for universities, on the other hand, averages at roughly 100 000 Euros annually, which MathWorks, the company owning matlab, claims to have sold to roughly 5000 universities.\cite{noauthor_matlab-lizenz_nodate}\\
+This is contrasted by the fact that Matlab is not faster or easier to use than the publicly available alternatives\cite{noauthor_performancepython_nodate}. Its strength lies in its position as the established standard for data analysis; it was first published in 1984 and has been in use ever since. This is why it has a large body of libraries and methods available for a wide range of analysis types, perhaps its strongest advantage over the freely available alternatives. There is no clear incentive to further build on this body of software; enhancing the range of applications of Matlab's competitors however is intuitively merited.\\
+As mentioned before, this API is built in python. It is free and easily accessible, making it one of the mentioned alternatives. The code also allows for easy modifications: its relatively small body, published under the GPL, can be adapted and extended easily.\\
+Due to the low computational cost of the algorithm mentioned in section \ref{runtime}, one such extension possible would be to make the method run online; the fast speed easily allows for CNI deconvolution during an ongoing experiment.\\
+However, this would require a pre-existing alpha kernel. It would need to be taken from existing data, preferably using the same experimental setup, and could be adapted to the calcium dynamics at hand during runtime. The experimental procedure would thus require a stimulus-free starting phase to get the parameters necessary for the deconvolution, after which on-line analysis can be initiated, or alternatively a kernel function taken from identical trials.\\
+Going forward, this extension of the API would likely be the first candidate of development; albeit some refactoring of existing algorithms would be necessary, most of the code can be reused for this purpose.
+\section{Conclusion}
+CIDA performs well as long as a suitable reference can be found, which is the case for non-continuous spiking activity. Data which does not allow this distinction to be made is generally hard to deconvolve, however, and it is questionable whether more complex algorithms can tackle this problem.\\
+CNI itself is not aiming at high temporal or spiking resolutions, for which patch-clamps are the gold standard\cite{yajuan_comparison_2012}. Its strengths are rather the usability as well as the high number of cells captured per run\cite{grienberger_imaging_2012},
+which high-complexity algorithms with explosive computational cost do not remedy.
+While other analysis procedures yield higher accuracy scores, straight-forward deconvolution allows for the same conclusions to be drawn from data: the properties of CNI do not allow it to assess minute spiking fluctuations; regardless of small gains in correlation.\\
+Since algebraic deconvolution is highly dependent on an adequate selection of template transients for its kernel, upping the algorithmic complexity slightly in favor of a more dedicated annotation process improves its performance on both simulated and supervised in-vivo data, while remaining very fast comparatively.\\
+Additionally, most, if not all, published methods for analyzing CNI data are either implemented in matlab or do not provide any code or implementation details\cite{ranganathan_optical_2010}\cite{sasaki_fast_2008}\cite{vogelstein_spike_2009}\cite{deneux_accurate_2016}\cite{kerr_imaging_2005}\cite{ozden_identification_2008}\cite{romano_integrated_2017}.\\
+The API presented here, on the other hand, is freely available via a GNU public license, thus allowing for at-will modification of the code, has no further dependencies outside of standard python libraries, and includes a script which can be run via console to deconvolve supplied data.\\
+Furthermore, it can feasibly be extended to an on-line method, enabling analysis of experiments as they are being conducted, thus allowing for ongoing development going forward
+\section{Acknowledgements}
+I would like to express my gratitude to Marie Rooy and Dr. Boris Gutkin of the ENS Paris, who helped me with great patience through my numerous misunderstandings and my initial lack of knowledge concerning the subject. \\
+Several people helped me by providing feedback and pointing out mistakes in the work, first and foremost Claire Cooper, without whom this thesis surely would have suffered from an even greater abundance of flaws. \\
+Without the aid of these people, this work would not have been possible. \\
+Thank you.
+\newpage
+
+\printbibliography
+
+\end{document}
