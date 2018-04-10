@@ -4,7 +4,7 @@ import soundfile as sf
 import numpy as np
 import sys
 import seaborn as sb
-import pandas as pdsys.path.insert(0, '/home/maximilian/pycharm/')
+sys.path.insert(0, '/home/maximilian/pycharm/')
 sys.path.insert(0, '/home/maximilian/unistuff/paris_ens/cal_neuroim/pystuff/')
 
 wd = '/home/maximilian/jlab_fishies/jupyter_notebooks/megaSamples/'
