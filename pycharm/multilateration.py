@@ -1,6 +1,7 @@
 import numpy as np
 import scipy.signal as sig
 
+
 def highpass_filter(rate, data, cutoff, order=3, verbose=True):
     data = data.ravel()
     nyq = 0.5*rate
@@ -10,6 +11,7 @@ def highpass_filter(rate, data, cutoff, order=3, verbose=True):
         fdata = sig.lfilter( b, a, data )
     return fdata
 
+
 def lowpass_filter(rate, data, cutoff, order=3, verbose=True) :
     data = data.ravel()	
     nyq = 0.5*rate
@@ -18,6 +20,7 @@ def lowpass_filter(rate, data, cutoff, order=3, verbose=True) :
     for o in xrange(order):
         fdata = sig.filtfilt(b, a, data)
     return fdata
+
 
 def envelope(rate, data, window_size=0.0005, gauss=False):
     from scipy.signal import gaussian
@@ -32,6 +35,7 @@ def envelope(rate, data, window_size=0.0005, gauss=False):
                      np.correlate(data, w, mode='same') ** 2)).ravel())* np.sqrt(2.)
     return rstd
 
+
 def filterMatrix(rate, data, cutoff,envelopeBool = False):
     containerMatrix = np.zeros(data.shape)
     for num,i in enumerate(data[:]):
@@ -41,37 +45,39 @@ def filterMatrix(rate, data, cutoff,envelopeBool = False):
             containerMatrix[num] = envelope(rate,containerMatrix[num])
     return containerMatrix
 
+
 def getFirstElements(inputMatrix):
     returnList = list()
     for i in inputMatrix:
         returnList.append(i[0])
     return returnList
 
+
 def getOverlappingTransients(transientList, distance = 20):
-    '''
+    """
     @arg transientList: list of lists of transients
     @arg distance: int of sample distance considered to be an overlap
     iterates over one list of transients and checks the other lists for corresponding (determined by distance) events.
     @return: tuples of transients which start within a distance-amount of samples within each other
-    '''
+    """
     matchingTransients = list()
-    for transient in transientList[0]:#pick first list, iterate over
+    for transient in transientList[0]:  # pick first list, iterate over
         matcher = [transient]
-        hasMatch = False #boolean to store whether we have matches so far
+        hasMatch = False  # boolean to store whether we have matches so far
         rangeDown = transient.startTime-distance
         rangeUp = transient.startTime+distance
         # now: check all other transient lists for occurence within distance... get iterator for lists
         for otherLists in transientList[1:]:
-            for entry in otherLists: # entries of subsequent list
-                if (rangeDown < entry.startTime < rangeUp): # found occurence within range, continue with next list
-                    matcher.append(entry) # keep transients in temp list
+            for entry in otherLists:  # entries of subsequent list
+                if (rangeDown < entry.startTime < rangeUp):  # found occurence within range, continue with next list
+                    matcher.append(entry)  # keep transients in temp list
                     hasMatch = True
                     '''
                     Problem: can shorten list of transients upon finding something because it is ordered 
                     BUT: iterator is already created, so does it help?
                     Is this even a bottleneck worth the trouble in the first place?'''
                     continue
-                hasMatch = False # above clause is false for the current list = no match found
+                hasMatch = False  # above clause is false for the current list = no match found
         if(hasMatch):
             matchingTransients.append(matcher)
     return(matchingTransients)
