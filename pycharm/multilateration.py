@@ -36,13 +36,22 @@ def envelope(rate, data, window_size=0.0005, gauss=False):
     return rstd
 
 
-def filterMatrix(rate, data, cutoff,envelopeBool = False):
+def filterMatrix(rate, data, cutofflow=200, cutoffhigh=10000, envelopewindow=None):
+    """
+
+    :param rate: sampling rate used during recording
+    :param data: data to be filtered (has to be n x m matrix)
+    :param cutofflow: freq used by the highpass filter
+    :param cutoffhigh:  freq used by the lowpass filter
+    :param envelopewindow:  apply RMS normalization? if none -> use window size listed (in seconds)
+    :return: filtered matrix
+    """
     containerMatrix = np.zeros(data.shape)
     for num,i in enumerate(data[:]):
-        containerMatrix[num] = highpass_filter(rate, i, cutoff)
-        containerMatrix[num] = lowpass_filter(rate, containerMatrix[num],10000)
-        if(envelopeBool):
-            containerMatrix[num] = envelope(rate,containerMatrix[num])
+        containerMatrix[num] = highpass_filter(rate, i, cutofflow)
+        containerMatrix[num] = lowpass_filter(rate, containerMatrix[num],cutoffhigh)
+        if(envelopewindow):
+            containerMatrix[num] = envelope(rate, containerMatrix[num], window_size=envelopewindow)
     return containerMatrix
 
 
@@ -55,10 +64,10 @@ def getFirstElements(inputMatrix):
 
 def getOverlappingTransients(transientList, distance = 20):
     """
-    @arg transientList: list of lists of transients
-    @arg distance: int of sample distance considered to be an overlap
+    :param transientList: list of lists of transients
+    :param distance: int of sample distance considered to be an overlap
     iterates over one list of transients and checks the other lists for corresponding (determined by distance) events.
-    @return: tuples of transients which start within a distance-amount of samples within each other
+    :return: tuples of transients which start within a distance-amount of samples within each other
     """
     matchingTransients = list()
     for transient in transientList[0]:  # pick first list, iterate over
